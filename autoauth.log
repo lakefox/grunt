@@ -1,0 +1,9 @@
+2024/09/01 21:21:01 Starting auto-authentication program
+2024/09/01 21:21:01 Using network interface: en1
+2024/09/01 21:21:01 Listening for ARP packets to detect devices on the network...
+2024/09/01 21:21:06 Detected device with IP: 192.168.0.15
+2024/09/01 21:21:07 Detected device with IP: 192.168.0.13
+2024/09/01 21:21:07 Detected device with IP: 192.168.0.11
+2024/09/01 21:21:24 Detected device with IP: 192.168.0.29
+2024/09/01 21:21:59 Detected device with IP: 192.168.0.1
+2024/09/01 21:23:02 Detected device with IP: 192.168.0.28

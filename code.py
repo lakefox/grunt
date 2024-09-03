@@ -6,6 +6,9 @@ from adafruit_wiznet5k.adafruit_wiznet5k import WIZNET5K
 from adafruit_wiznet5k.adafruit_wiznet5k_socketpool import SocketPool
 import pwmio
 import adafruit_motor.servo
+import grunt
+import time
+
 
 def mac_string_to_tuple(mac_string):
     return tuple(int(part, 16) for part in mac_string.split(":"))
@@ -18,6 +21,31 @@ def ip_string_to_tuple(ip_string):
 
 def ip_tuple_to_string(ip_tuple):
     return ".".join(str(part) for part in ip_tuple)
+
+class SimpleQueue:
+    def __init__(self):
+        self.queue = []
+    
+    def append(self, item):
+        self.queue.append(item)
+    
+    def popleft(self):
+        if self.queue:
+            return self.queue.pop(0)
+        else:
+            raise IndexError("pop from an empty queue")
+    
+    def __len__(self):
+        return len(self.queue)
+
+# Queue to store incoming messages
+message_queue = SimpleQueue()
+
+# Message identifier for G-code messages
+GCODE_IDENTIFIER = "[GCODE]"
+
+# Flag to indicate if receive_message is waiting for a message
+receiving_message = False
 
 # Configuration
 SPI1_SCK = board.GP10
@@ -115,46 +143,107 @@ def move_stepper(steps, direction):
 def handle_command(command, conn):
     global listening_pins
     
-    if command.startswith("servo"):
-        angle = int(command.split(" ")[1])
-        print(angle)
-        servo.angle = angle
-    elif command.startswith("relay on"):
-        relay.value = True
-    elif command.startswith("relay off"):
-        relay.value = False
-    elif command.startswith("stepper"):
-        parts = command.split(" ")
-        steps = int(parts[1])
-        direction = parts[2].lower() == "forward"
-        move_stepper(steps, direction)
-    elif command == "kill":
-        servo.angle = None
-        step_pin.value = False
-    elif command.startswith("listen"):
-        pin_number = int(command.split(" ")[1])
-        try:
-            pin = digitalio.DigitalInOut(getattr(board, f"GP{pin_number}"))
-            pin.direction = digitalio.Direction.INPUT
-            listening_pins[pin_number] = {'pin': pin, 'last_value': pin.value}
-            conn.send(f"Listening on pin {pin_number}\n".encode("utf-8"))
-        except Exception as e:
-            conn.send(f"Error: {e}\n".encode("utf-8"))
-    elif command.startswith("unlisten"):
-        pin_number = int(command.split(" ")[1])
-        if pin_number in listening_pins:
-            del listening_pins[pin_number]
-            conn.send(f"Stopped listening on pin {pin_number}\n".encode("utf-8"))
-        else:
-            conn.send(f"Pin {pin_number} is not being listened to.\n".encode("utf-8"))
-    elif command.startswith("test on"):
+    if command.startswith("test on"):
         led.value = True
     elif command.startswith("test off"):
         led.value = False
     elif command.startswith("autoauth"):
         code = int(command.split(" ")[1])
         conn.send(f"{code}".encode("utf-8"))
+    else:
+        machine.run(command)
     return "OK"
+
+
+machine = grunt.Grunt()
+
+# Stepper 
+def g14_handler(args):
+    # G14 (S)TEPS (D)IRECTION (+/-)
+    s = args.get("S", 0)
+    d = args.get("D", "+")
+    move_stepper(s,d=="+")
+machine.register("G14", g14_handler)
+
+# Servo
+def g15_handler(args):
+    # G15 (A)ngle
+    # Need to add a way to control servo PWM Freq
+    a = args.get("A", 0)
+    servo.angle = a
+machine.register("G15", g15_handler)
+
+# Relay On
+def m10_handler(args):
+    # M10
+    relay.value = True
+machine.register("M10", m10_handler)
+
+# Relay Off
+def m11_handler(args):
+    # M11
+    relay.value = True
+machine.register("M11", m11_handler)
+
+allowed_pins = [board.GP5]
+
+def read_pin(pin_number):
+        print(f"Reading from pin {pin_number}")
+        if len(allowed_pins) >= pin_number:
+            return 0
+        pin = digitalio.DigitalInOut(allowed_pins[pin_number])
+        pin.direction = digitalio.Direction.INPUT
+        return pin.value
+machine.register("READ", read_pin)
+
+def write_pin(pin_number, value):
+    print(f"Writing value {value} to pin {pin_number}")
+    if len(allowed_pins) > pin_number:
+        pin = digitalio.DigitalInOut(allowed_pins[pin_number])
+        pin.direction = digitalio.Direction.OUTPUT
+        pin.value = bool(value)  # Set pin to True or False based on value
+    else:
+        print(f"Error: Pin number {pin_number} is out of allowed range")
+
+machine.register("WRITEPIN", write_pin)
+
+def send_message(message):
+    full_message = f"{GCODE_IDENTIFIER} {message}"
+    conn.send(f"{full_message}\n".encode("utf-8"))
+    print(f"Sent message: {full_message}")
+
+machine.register("WRITEMSG", send_message)
+
+def receive_message(timeout):
+    global message_queue, receiving_message
+    start_time = time.monotonic()
+    
+    # Set the flag indicating we're waiting for a message
+    receiving_message = True
+    
+    # Check if there is a message in the queue
+    if message_queue:
+        receiving_message = False
+        return message_queue.popleft()
+
+    # Wait for a message with the identifier
+    while (time.monotonic() - start_time) < timeout:
+        try:
+            data = conn.recv(1024).decode("utf-8").strip()
+            if data.startswith(GCODE_IDENTIFIER):
+                message = data[len(GCODE_IDENTIFIER):].strip()
+                receiving_message = False
+                return message
+        except Exception as e:
+            print(f"Error receiving message: {e}")
+            break
+
+    # If no message is received within the timeout, reset the flag
+    receiving_message = False
+    print(f"No message received within {timeout} seconds.")
+    return None
+
+machine.register("RECV", receive_message)
 
 # Main loop to listen for commands and poll pins
 while True:
@@ -177,6 +266,17 @@ while True:
                 data = conn.recv(1024).decode("utf-8")
                 if not data:
                     break
+
+                # If receive_message is active, skip G-code messages
+                if receiving_message and data.startswith(GCODE_IDENTIFIER):
+                    continue
+
+                # If it's a G-code message and not waiting, add to the queue
+                if data.startswith(GCODE_IDENTIFIER):
+                    message_queue.append(data[len(GCODE_IDENTIFIER):].strip())
+                    continue
+
+                # Handle other commands
                 response = handle_command(data.strip(), conn)
                 conn.send(response.encode("utf-8"))
                 
