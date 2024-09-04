@@ -12,12 +12,14 @@ type GPIOHandler struct {
 	lastStateB   bool
 	buttonEvents map[int]func(bool) // Map to store button event handlers
 	scrollEvent  func(int)          // Function to handle scroll events
+	lines        []*gpiocdev.Line   // Store lines to keep them open
 }
 
-// NewGPIOHandler initializes the GPIO handler
+// NewHandler initializes the GPIO handler
 func NewHandler() *GPIOHandler {
 	return &GPIOHandler{
 		buttonEvents: make(map[int]func(bool)),
+		lines:        make([]*gpiocdev.Line, 0), // Initialize lines slice
 	}
 }
 
@@ -27,7 +29,6 @@ func (gh *GPIOHandler) AddScrollListener(handler func(int)) {
 }
 
 // AddButtonListener sets the event handler for a specific button
-// The handler receives a boolean indicating the button state (true for pressed, false for released)
 func (gh *GPIOHandler) AddButtonListener(buttonPin int, handler func(bool)) {
 	gh.buttonEvents[buttonPin] = handler
 }
@@ -38,13 +39,13 @@ func (gh *GPIOHandler) InitializeScroll(pinA, pinB int) error {
 	if err != nil {
 		return fmt.Errorf("error requesting line %d: %v", pinA, err)
 	}
-	defer lineA.Close()
+	gh.lines = append(gh.lines, lineA) // Keep the line open
 
 	lineB, err := gpiocdev.RequestLine("gpiochip0", pinB, gpiocdev.AsInput, gpiocdev.WithPullUp, gpiocdev.WithBothEdges, gpiocdev.WithEventHandler(gh.scrollEventHandler))
 	if err != nil {
 		return fmt.Errorf("error requesting line %d: %v", pinB, err)
 	}
-	defer lineB.Close()
+	gh.lines = append(gh.lines, lineB) // Keep the line open
 
 	return nil
 }
@@ -55,7 +56,7 @@ func (gh *GPIOHandler) InitializeButton(buttonPin int) error {
 	if err != nil {
 		return fmt.Errorf("error requesting button line %d: %v", buttonPin, err)
 	}
-	defer line.Close()
+	gh.lines = append(gh.lines, line) // Keep the line open
 
 	return nil
 }
@@ -65,13 +66,12 @@ func (gh *GPIOHandler) scrollEventHandler(evt gpiocdev.LineEvent) {
 	stateA := gh.lastStateA
 	stateB := gh.lastStateB
 
-	if evt.Offset == 263 { // Replace with actual pin numbers for A and B
+	if evt.Offset == 263 {
 		stateA = (evt.Type == gpiocdev.LineEventRisingEdge)
 	} else if evt.Offset == 264 {
 		stateB = (evt.Type == gpiocdev.LineEventRisingEdge)
 	}
 
-	// Determine direction
 	if stateA != gh.lastStateA {
 		if stateA != stateB {
 			gh.pulseCount++
@@ -86,11 +86,9 @@ func (gh *GPIOHandler) scrollEventHandler(evt gpiocdev.LineEvent) {
 		}
 	}
 
-	// Update the last states
 	gh.lastStateA = stateA
 	gh.lastStateB = stateB
 
-	// Call the scroll event handler if defined
 	if gh.scrollEvent != nil {
 		gh.scrollEvent(gh.pulseCount)
 	}
@@ -98,7 +96,6 @@ func (gh *GPIOHandler) scrollEventHandler(evt gpiocdev.LineEvent) {
 
 // buttonEventHandler handles button press and release events
 func (gh *GPIOHandler) buttonEventHandler(evt gpiocdev.LineEvent) {
-	// Call the associated button event handler
 	if handler, exists := gh.buttonEvents[evt.Offset]; exists {
 		if evt.Type == gpiocdev.LineEventRisingEdge {
 			handler(false) // Button released

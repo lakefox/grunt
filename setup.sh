@@ -121,4 +121,8 @@ fi
 setup_enc28j60
 test_ethernet
 
+echo "Installing libgpiod-dev"
+sudo apt-get install -y gpiod libgpiod-dev
+
+
 echo "All tasks completed successfully."
